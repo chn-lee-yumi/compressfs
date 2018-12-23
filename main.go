@@ -1,6 +1,6 @@
 // 目前暂不支持目录和权限修改。
-// TODO:文件权限修改、内容修改覆盖等功能。
-// TODO:读写效率极低，优化方案：打开文件时解压，关闭文件时压缩。
+// TODO:读写效率极低，优化方案：打开文件时解压(open/create)，关闭文件时压缩(release)。
+// TODO:gzip、zlib有BUG
 
 package main
 
@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"syscall"
+	//"syscall"
 	"io/ioutil"
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -19,9 +19,13 @@ import (
 	"io"
 	"bytes"
 	"compress/lzw"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 )
 
 var SOURCE_DIR string
+var compress_mode string
 
 var inode uint64
 
@@ -35,12 +39,19 @@ type Node struct {
 	name  string
 }
 
+const compress_description=`
+支持的压缩方式有：lzw,flate1,flate9。
+	lzw: lzw的方式压缩
+	flate1: flate的方式，最快速度
+	flate9: flate的方式，最高压缩率
+`
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s SOURCE_DIR MOUNTPOINT\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "例子：  %s ./testdir/ /mnt\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "注意SOURCE_DIR后面要有斜杠。\n")
-	flag.PrintDefaults()
+	fmt.Fprintf(os.Stderr, "  %s SOURCE_DIR MOUNTPOINT COMPRESS_TYPE\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "例子：  %s testdir/ /mnt lzw\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "注意SOURCE_DIR后面要有斜杠。MOUNTPOINT有无都可\n")
+	fmt.Fprintf(os.Stderr, compress_description)
+	//flag.PrintDefaults()
 }
 
 func run(mountpoint string) error {
@@ -98,12 +109,24 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	if flag.NArg() < 2 {
+	if flag.NArg() < 3 {
 		usage()
 		os.Exit(2)
 	}
 	SOURCE_DIR = flag.Arg(0)
 	mountpoint := flag.Arg(1)
+	compress_mode=flag.Arg(2)
+	switch compress_mode {
+	case "lzw":
+	case "flate1":
+	case "flate9":
+	case "gzip":
+	case "zlib":
+	default:
+		fmt.Println("压缩参数错误！")
+		usage()
+		os.Exit(2)
+	}
 
 	if err := run(mountpoint); err != nil {
 		log.Fatal(err)
@@ -218,8 +241,13 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wri
 	if err!=nil {
 		fmt.Println("[Write ERROR]",err)
 	}
-	r := lzw.NewReader(fr, lzw.LSB, 8) //读取压缩文件
+	r,err := NewReader(fr)
+	if err != nil {
+		fmt.Println(err.Error())
+		return nil
+	}
 	defer r.Close()
+ 	//读取压缩文件
 	io.Copy(ft, r)
 	//修改内容
 	ft.WriteAt(req.Data,req.Offset)
@@ -228,9 +256,15 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wri
 	defer fw.Close()
 	if err != nil {
 		fmt.Println("[Write ERROR]打开文件失败！",f.name,err.Error())
+		return nil
 	}
-	w := lzw.NewWriter(fw, lzw.LSB, 8) //压缩方式写入
+	w,err := NewWriter(fw)
+	if err != nil {
+		fmt.Println(err.Error())
+		return nil
+	}
     defer w.Close()
+ 	//压缩方式写入
 	ft.Seek(0,os.SEEK_SET)
     io.Copy(w, ft)
 	/*_, err = fw.Write(req.Data)
@@ -263,18 +297,18 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 type File struct {
 	Node
-	//name string
+	tmpPath string //如果为空，说明没有解压。解压后这里设置为解压后的路径。release时再压缩写入。
+	modified bool //如果为true，release后压缩写入，否则不进行操作
 }
 
 var _ fs.Node = (*File)(nil)
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error { //该函数返回文件属性
+	//TODO：增加access time，根据访问时间进行缓存的删除
 	a.Inode = f.inode
 	a.Mode = 0777 //TODO:增加chmod特性
 	fmt.Println("[*File Attr]f.name:",f.name)
 	a.Size = getFileSize(SOURCE_DIR+f.name)
-	//fmt.Println("[*File Attr]f.fuse:",f.fuse) //好像没什么用
-	//fmt.Println("[*File Attr]ctx:",ctx) //好像没什么用
 	fmt.Println("[*File Attr]a:",a) //文件属性
 	return nil
 }
@@ -282,11 +316,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error { //该函数返回
 var _ fs.NodeOpener = (*File)(nil)
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	fmt.Println("[Open]req:",req)
-	if !req.Flags.IsReadOnly() {
-		return nil, fuse.Errno(syscall.EACCES)
-	}
-	resp.Flags |= fuse.OpenKeepCache
+	fmt.Println("[Open]file:",f.name)
 	return f, nil
 }
 
@@ -295,12 +325,19 @@ var _ fs.Handle = (*File)(nil)
 var _ fs.HandleReader = (*File)(nil)
 
 func (f *File) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	fmt.Println("[Read]file:",f.name)
 	fr,err:=os.Open(SOURCE_DIR+f.name)
+    defer fr.Close()
 	if err!=nil {
 		fmt.Println("[Read ERROR]",err)
 	}
-	r := lzw.NewReader(fr, lzw.LSB, 8) //读取压缩文件
+	r,err := NewReader(fr)
+	if err != nil {
+		fmt.Println(err.Error())
+		return nil
+	}
     defer r.Close()
+ 	//读取压缩文件
 	buf:=bytes.NewBuffer(nil)
     io.Copy(buf, r)
 
@@ -312,6 +349,31 @@ func (f *File) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadR
 }
 
 func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	fmt.Println("[Fsync]file:",f.name)
+	return nil
+}
+
+func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	fmt.Println("[Release]file:",f.name)
+	/*type ReleaseRequest struct {
+    Header       `json:"-"`
+    Dir          bool // is this Releasedir?
+    Handle       HandleID
+    Flags        OpenFlags // flags from OpenRequest
+    ReleaseFlags ReleaseFlags
+    LockOwner    uint32
+	}*/
+	return nil
+}
+
+func (f *File) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	fmt.Println("[Flush]file:",f.name)
+	/*type FlushRequest struct {
+    Header    `json:"-"`
+    Handle    HandleID
+    Flags     uint32
+    LockOwner uint64
+	}*/
 	return nil
 }
 
@@ -319,11 +381,18 @@ func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 
 func getFileSize(filepath string) uint64 {
 	fr,err:=os.Open(filepath)
+	defer fr.Close()
 	if err!=nil {
-		fmt.Println("[Read ERROR]",err)
+		fmt.Println("[getFileSize ERROR, os.Open]",err)
+		return uint64(0)
 	}
-	r := lzw.NewReader(fr, lzw.LSB, 8) //读取压缩文件
+	r,err := NewReader(fr)
+	if err != nil {
+		fmt.Println("[getFileSize ERROR, NewReader]",err)
+		return uint64(0)
+	}
 	defer r.Close()
+	//读取压缩文件
 	buf:=bytes.NewBuffer(nil)
     io.Copy(buf, r)
 	return uint64(buf.Len())
@@ -338,4 +407,38 @@ func getFileSize(filepath string) uint64 {
 		os.Exit(1)
 	}
     return uint64(file_size)*/
+}
+
+func NewReader(r io.Reader)(io.ReadCloser,error){
+	switch compress_mode {
+	case "lzw":
+		return lzw.NewReader(r, lzw.LSB, 8),nil
+	case "flate1":
+		return flate.NewReader(r),nil
+	case "flate9":
+		return flate.NewReader(r),nil
+	case "gzip":
+		return gzip.NewReader(r)
+	case "zlib":
+		return zlib.NewReader(r)
+	}
+	fmt.Println("[ERROR]!")
+	return nil,nil
+}
+
+func NewWriter(w io.Writer)(io.WriteCloser,error){
+	switch compress_mode {
+	case "lzw":
+		return lzw.NewWriter(w, lzw.LSB, 8),nil
+	case "flate1":
+		return flate.NewWriter(w,flate.BestSpeed)
+	case "flate9":
+		return flate.NewWriter(w,flate.BestCompression)
+	case "gzip":
+		return gzip.NewWriterLevel(w,gzip.BestCompression)
+	case "zlib":
+		return zlib.NewWriterLevel(w,zlib.BestCompression)
+	}
+	fmt.Println("[ERROR]!")
+	return nil,nil
 }
