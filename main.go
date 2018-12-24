@@ -187,8 +187,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 var _ fs.NodeStringLookuper = (*Dir)(nil)
 
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	fmt.Println("[Lookup]name:",name)
-
+	//fmt.Println("[Lookup]name:",name)
 	if d.files != nil {
 		for _, n := range *d.files {
 			if n.name == name {
@@ -223,67 +222,9 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	return children, nil
 }
 
-func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	fmt.Println("[Write]req:",req)
-	resp.Size = len(req.Data)
-	f.modified=true
-	//打开临时文件
-	ft, err := os.OpenFile(f.tmpPath, os.O_RDWR|os.O_CREATE, 0755)
-	defer ft.Close()
-	if err!=nil {
-		fmt.Println("[Write ERROR]",err)
-	}
-	//修改临时文件
-	ft.WriteAt(req.Data,req.Offset)
-
-	/*//先解压文件
-	fr, err := os.Open(SOURCE_DIR+f.name)
-	defer fr.Close()
-	if err!=nil {
-		fmt.Println("[Write ERROR]",err)
-	}
-	ft, err := os.OpenFile(SOURCE_DIR+f.name+".tmp", os.O_RDWR|os.O_CREATE, 0755)
-	defer os.Remove(SOURCE_DIR+f.name+".tmp")
-	defer ft.Close()
-	if err!=nil {
-		fmt.Println("[Write ERROR]",err)
-	}
-	r,err := NewReader(fr)
-	if err != nil {
-		fmt.Println(err.Error())
-		return nil
-	}
-	defer r.Close()
- 	//读取压缩文件
-	io.Copy(ft, r)
-	//修改内容
-	ft.WriteAt(req.Data,req.Offset)
-	//写入到文件
-	fw, err := os.OpenFile(SOURCE_DIR+f.name, os.O_WRONLY|os.O_TRUNC, 0600)
-	defer fw.Close()
-	if err != nil {
-		fmt.Println("[Write ERROR]打开文件失败！",f.name,err.Error())
-		return nil
-	}
-	w,err := NewWriter(fw)
-	if err != nil {
-		fmt.Println(err.Error())
-		return nil
-	}
-    defer w.Close()
- 	//压缩方式写入
-	ft.Seek(0,os.SEEK_SET)
-    io.Copy(w, ft)
-	/*_, err = fw.Write(req.Data)
-	if err != nil {
-		fmt.Println("[Write ERROR]写入文件失败！",f.name,err.Error())
-	}*/
-
-	return nil
-}
-
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	fmt.Println("[Create]req:",req)
+	//fmt.Println("[Create]req:",req)
+	fmt.Println("[Create]file:",req.Name)
 	f := &File{Node: Node{name: req.Name, inode: NewInode()}, tmpPath:"", modified:false}
 	files := []*File{f}
 	if d.files != nil {
@@ -298,12 +239,14 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	}
 	//创建tmp文件
 	fc2,err := os.Create(SOURCE_DIR+req.Name+".tmp")
-	defer fc2.Close()
+	//defer fc2.Close()
 	if err!=nil {
 		fmt.Println("[Create ERROR]创建临时文件失败！",err.Error())
 	}
 	//设置文件临时路径
 	f.tmpPath=SOURCE_DIR+f.name+".tmp"
+	//存储文件指针
+	f.file=fc2
 
 	return f, f, nil
 }
@@ -314,6 +257,7 @@ type File struct {
 	Node
 	tmpPath string //如果为空，说明没有解压。解压后这里设置为解压后的路径。release时再压缩写入。
 	modified bool //如果为true，release后压缩写入，否则不进行操作
+	file *os.File
 }
 
 var _ fs.Node = (*File)(nil)
@@ -322,7 +266,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error { //该函数返回
 	//TODO：增加access time，根据访问时间进行缓存的删除
 	a.Inode = f.inode
 	a.Mode = 0777 //TODO:增加chmod特性
-	fmt.Println("[*File Attr]f.name:",f.name)
+	//fmt.Println("[*File Attr]f.name:",f.name)
 	if f.tmpPath!="" {
 		a.Size = getFileSize(f.tmpPath)
 	}else{
@@ -346,7 +290,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error { //该函数返回
 		a.Size = uint64(buf.Len())
 	}
 	//a.Size = getFileSize(SOURCE_DIR+f.name)
-	fmt.Println("[*File Attr]a:",a) //文件属性
+	//fmt.Println("[*File Attr]a:",a) //文件属性
 	return nil
 }
 
@@ -364,7 +308,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		}
 		//打开临时文件
 		ft, err := os.OpenFile(SOURCE_DIR+f.name+".tmp", os.O_RDWR|os.O_CREATE, 0755)
-		defer ft.Close()
+		//defer ft.Close()
 		if err!=nil {
 			fmt.Println("[Open ERROR]",err)
 		}
@@ -379,6 +323,8 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		io.Copy(ft, r)
 		//设置文件临时路径
 		f.tmpPath=SOURCE_DIR+f.name+".tmp"
+		//存储文件指针
+		f.file=ft
 	}
 	return f, nil
 }
@@ -389,45 +335,25 @@ var _ fs.HandleReader = (*File)(nil)
 
 func (f *File) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	//读取tmp文件
-	fmt.Println("[Read]file:",f.name)
-	fr,err:=os.Open(f.tmpPath)
-    defer fr.Close()
-	if err!=nil {
-		fmt.Println("[Read ERROR]",err)
-	}
-	fr.ReadAt(resp.Data[:req.Size], req.Offset)
+	//fmt.Println("[Read]file:",f.name)
+	f.file.ReadAt(resp.Data[:req.Size], req.Offset)
 	resp.Data = resp.Data[:req.Size]
-	fmt.Println("[Read]req:",req)
-	/*fr,err:=os.Open(SOURCE_DIR+f.name)
-    defer fr.Close()
-	if err!=nil {
-		fmt.Println("[Read ERROR]",err)
-	}
-	r,err := NewReader(fr)
-	if err != nil {
-		fmt.Println(err.Error())
-		return nil
-	}
-    defer r.Close()
- 	//读取压缩文件
-	buf:=bytes.NewBuffer(nil)
-    io.Copy(buf, r)
-	fuseutil.HandleRead(req, resp, buf.Bytes())
-	fmt.Println("[Read]req:",req)
-	//fmt.Println("[Read]resp:",resp)*/
+	//fmt.Println("[Read]req:",req)
 	return nil
 }
 
+func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	//写入tmp文件
+	//fmt.Println("[Write]req:",req)
+	resp.Size = len(req.Data)
+	f.modified=true
+	f.file.WriteAt(req.Data,req.Offset)
+	return nil
+}
 
 func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	fmt.Println("[Release]file:",f.name)
 	if f.modified==true { //如果修改了就重新压缩
-		//打开临时文件
-		fr, err := os.Open(f.tmpPath)
-		defer fr.Close()
-		if err!=nil {
-			fmt.Println("[Write ERROR]",err)
-		}
 		//打开压缩文件
 		fw, err := os.OpenFile(SOURCE_DIR+f.name, os.O_WRONLY|os.O_TRUNC, 0600)
 		defer fw.Close()
@@ -443,8 +369,12 @@ func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 		}
 	    defer w.Close()
 	 	//压缩方式写入
-	    io.Copy(w, fr)
+		f.file.Seek(0, os.SEEK_SET)
+	    io.Copy(w, f.file)
 		f.modified=false
+		//关闭临时文件
+		f.file.Close()
+		f.file=nil
 	}
 	//删除临时文件
 	os.Remove(f.tmpPath)
@@ -454,35 +384,19 @@ func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 
 func (f *File) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	//TODO：这个是干啥的？
-	fmt.Println("[Flush]file:",f.name)
+	//fmt.Println("[Flush]file:",f.name)
 	return nil
 }
 
 func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	//TODO：这个是干啥的？
-	fmt.Println("[Fsync]file:",f.name)
+	//fmt.Println("[Fsync]file:",f.name)
 	return nil
 }
 
 /**********************************************/
 
 func getFileSize(filepath string) uint64 {
-	/*fr,err:=os.Open(filepath)
-	defer fr.Close()
-	if err!=nil {
-		fmt.Println("[getFileSize ERROR, os.Open]",err)
-		return uint64(0)
-	}
-	r,err := NewReader(fr)
-	if err != nil {
-		fmt.Println("[getFileSize ERROR, NewReader]",err)
-		return uint64(0)
-	}
-	defer r.Close()
-	//读取压缩文件
-	buf:=bytes.NewBuffer(nil)
-    io.Copy(buf, r)
-	return uint64(buf.Len())*/
     f, err := os.Open(filepath)
     if err != nil {
         fmt.Println("[getFileSize ERROR]文件大小读取错误！",err)
