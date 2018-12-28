@@ -34,7 +34,6 @@ compressfs：(flate,BestCompression) # 这个比BestSpeed还要高，可能是�
 ```
 
 - 目前支持两种压缩方式：lzw和flate。压缩率：flate > lzw。
-- 已知BUG：大文件覆盖写入时文件可能会损坏。问题似乎出现在Release函数，待排错。
 
 ## 使用方法
 
