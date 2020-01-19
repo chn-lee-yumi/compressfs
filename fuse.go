@@ -1,7 +1,10 @@
-// TODO:解决多层目录的问题
+// TODO：兼容斜杠，Backend多斜杠修复等等
+// Truncate-》setattr检查
+// TODO：增加access time，根据访问时间进行缓存的删除
 // TODO：支持修改权限
 // TODO：支持连接
 // TODO：支持重命名
+// 文件删除太慢
 package main
 
 import (
@@ -13,84 +16,20 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"strings"
 )
-
-// 启动 FUSE
-func run() error {
-	c, err := fuse.Mount( // see: https://godoc.org/bazil.org/fuse#MountOption
-		Mountpoint,
-		fuse.FSName("compressfs"),
-		fuse.Subtype("compressfs"),
-		fuse.LocalVolume(),
-		fuse.VolumeName("compressfs filesystem"),
-	)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	if p := c.Protocol(); !p.HasInvalidate() {
-		return fmt.Errorf("kernel FUSE support is too old to have invalidations: version %v", p)
-	}
-
-	// 读取 BackendDir
-	fmt.Println("[run]读取BackendDir")
-	var files []*File
-	var dirs []*Dir
-	dir, err := ioutil.ReadDir(BackendDir) //读取目录文件名
-	if err != nil {
-		fmt.Println("[ERROR]BackendDir打开错误！", err)
-		os.Exit(1)
-	}
-	fmt.Println("[run]给files赋值")
-	for _, f := range dir {
-		if f.IsDir() {
-			dirs = append(dirs, &Dir{
-				Node: Node{
-					name:  f.Name(),
-					inode: NewInode()}})
-		} else {
-			files = append(files, &File{
-				Node: Node{
-					name:  f.Name(),
-					inode: NewInode()}})
-		}
-	}
-
-	// 初始化根文件系统
-	filesys := &FS{
-		root: &Dir{
-			Node:        Node{name: "/"},
-			files:       &files,
-			directories: &dirs}}
-
-	// 调用 Serve
-	fmt.Println("[run]调用Serve")
-	srv := fs.New(c, nil)
-	if err := srv.Serve(filesys); err != nil {
-		return err
-	}
-
-	// Check if the mount process has an error to report.
-	<-c.Ready
-	if err := c.MountError; err != nil {
-		return err
-	}
-	return nil
-}
 
 // 文件系统 inode
 var inode uint64
 
-// 返回一个新的 inode
+// 返回一个新的 inode  TODO: 使用自带函数生成inode
 func NewInode() uint64 {
 	inode += 1
 	return inode
 }
 
-/**********************************************/
-
-// https://gist.github.com/crgimenes/4740c19f00989823a30881f0916edf02
+// 文件系统
+var filesys FS
 
 // 定义一个“文件系统”结构体 https://godoc.org/bazil.org/fuse/fs#FS
 type FS struct {
@@ -107,7 +46,8 @@ func (f *FS) Root() (fs.Node, error) {
 type Node struct {
 	inode uint64
 	//parent_inode uint64
-	name string
+	name     string
+	fullPath string // 完整路径，以FUSE根目录为空，其绝对路径为BackendDir+fullPath（BackendDir带/）
 }
 
 // 目录结构体，自定义的，继承了Node结构体，一个目录下包含一些文件和目录
@@ -137,11 +77,15 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 // 文件结构体的Attr()方法，返回文件属性
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	//TODO：增加access time，根据访问时间进行缓存的删除
-	//fmt.Println("[Attr]", f.name)
+	fmt.Println("[Attr]", f.fullPath, "Inode:", f.inode)
 	a.Inode = f.inode
 
 	//打开压缩文件
-	fr, _ := os.Open(BackendDir + f.name)
+	fr, err := os.Open(BackendDir + f.fullPath)
+	if err != nil {
+		fmt.Println("[ERROR]Attr打开文件失败！", err)
+		return err
+	}
 	defer fr.Close()
 
 	//读取基本信息
@@ -224,12 +168,12 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 // 创建文件 https://godoc.org/bazil.org/fuse/fs#NodeCreater
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	fmt.Println("[Create]Dir:", d.name, "Name:", req.Name)
+	fmt.Println("[Create]Dir:", d.fullPath, "Name:", req.Name)
 	// 定义文件路径
-	path := BackendDir + req.Name       // 压缩后的存放路径
-	rawPath := path + ".compressfs.raw" // 解压后的存放路径
+	path := BackendDir + d.fullPath + "/" + req.Name // 压缩后的存放路径
+	rawPath := path + ".compressfs.raw"              // 解压后的存放路径
 	// 创建文件
-	fc, err := os.Create(BackendDir + req.Name)
+	fc, err := os.Create(path)
 	defer fc.Close()
 	if err != nil {
 		fmt.Println("[ERROR]创建文件失败！", err.Error())
@@ -242,8 +186,9 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	// 构造一个文件结构体
 	f := &File{
 		Node: Node{
-			name:  req.Name,
-			inode: NewInode()},
+			name:     req.Name,
+			inode:    NewInode(),
+			fullPath: d.fullPath + "/" + req.Name},
 		rawPath:  rawPath,
 		modified: false,
 		file:     fc2,
@@ -260,8 +205,8 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 // 删除文件或目录 https://godoc.org/bazil.org/fuse#RemoveRequest
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
-	fmt.Println("[Remove]Dir:", d.name, "Name:", req.Name, "Dir:", req.Dir)
-	os.Remove(BackendDir + req.Name) // 删除文件或空目录
+	fmt.Println("[Remove]Dir:", d.fullPath, "Name:", req.Name, "Dir:", req.Dir)
+	os.Remove(BackendDir + d.fullPath + req.Name) // 删除文件或空目录
 	// 如果是删除目录，判断是不是有目录
 	if req.Dir && d.directories != nil {
 		newDirs := []*Dir{}
@@ -291,15 +236,16 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 
 // 创建目录 https://godoc.org/bazil.org/fuse/fs#NodeMkdirer
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
-	fmt.Println("[Mkdir]", d.name, "Name:", req.Name, "Mode:", req.Mode)
-	path := BackendDir + req.Name
+	fmt.Println("[Mkdir]", d.fullPath, "Name:", req.Name, "Mode:", req.Mode)
+	path := BackendDir + d.fullPath + "/" + req.Name
 	// 创建目录
 	os.Mkdir(path, req.Mode)
 	// 构造一个目录结构体
 	f := &Dir{
 		Node: Node{
-			name:  req.Name,
-			inode: NewInode()},
+			name:     req.Name,
+			inode:    NewInode(),
+			fullPath: d.fullPath + "/" + req.Name},
 		files:       &[]*File{},
 		directories: &[]*Dir{}}
 	// 把新建的目录加到目录的目录列表里
@@ -313,9 +259,9 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 
 // 打开文件 https://godoc.org/bazil.org/fuse/fs#NodeOpener
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
-	fmt.Println("[Open]", f.name, "Inode:", f.inode, "Dir:", req.Dir, "Flags:", req.Flags)
+	fmt.Println("[Open]", f.fullPath, "Inode:", f.inode, "Dir:", req.Dir, "Flags:", req.Flags)
 	// 定义路径
-	path := BackendDir + f.name
+	path := BackendDir + f.fullPath
 	rawPath := path + ".compressfs.raw"
 	// 如果未解压，则解压
 	if f.rawPath == "" {
@@ -354,8 +300,9 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 			// 只读模式，构造一个新的Node返回，从而实现可以多次Open文件进行读取
 			fn := &File{
 				Node: Node{
-					name:  f.name,
-					inode: f.inode},
+					name:     f.name,
+					inode:    f.inode,
+					fullPath: f.fullPath},
 				rawPath: f.rawPath,
 				file:    fr,
 				flag:    os.O_RDONLY} // os.O_RDONLY == 0 详见：https://godoc.org/syscall#O_RDONLY
@@ -388,7 +335,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 
 // 读取文件 https://godoc.org/bazil.org/fuse/fs#HandleReader
 func (f *File) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	fmt.Println("[Read]", f.name, "Inode:", f.inode, "Dir:", req.Dir, "Size:", req.Size, "Offset:", req.Offset)
+	fmt.Println("[Read]", f.fullPath, "Inode:", f.inode, "Dir:", req.Dir, "Size:", req.Size, "Offset:", req.Offset)
 	// 读取解压后的文件，赋值到 resp.Data
 	f.file.ReadAt(resp.Data[:req.Size], req.Offset)
 	// 调整切片长度，详见切片机制：https://blog.csdn.net/u013474436/article/details/88770501
@@ -399,7 +346,7 @@ func (f *File) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadR
 // 写入文件 https://godoc.org/bazil.org/fuse/fs#HandleWriter 【文件变小的时候会有bug】
 func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
 	resp.Size = len(req.Data)
-	fmt.Println("[Write]", f.name, "Inode:", f.inode, "Size:", resp.Size, "Offset:", req.Offset, "Flags:", req.Flags, "FileFlags:", req.FileFlags)
+	fmt.Println("[Write]", f.fullPath, "Inode:", f.inode, "Size:", resp.Size, "Offset:", req.Offset, "Flags:", req.Flags, "FileFlags:", req.FileFlags)
 	// 如果flag是只读，则返回错误
 	if f.flag == os.O_RDONLY {
 		return fuse.EPERM // EPERM 操作不允许 参考：https://godoc.org/bazil.org/fuse#pkg-constants https://blog.csdn.net/a8039974/article/details/25830705
@@ -407,9 +354,9 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wri
 	// 文件标记为被修改
 	f.modified = true
 	// 写入文件
-	fmt.Println(req.Data)
-	n, err := f.file.WriteAt(req.Data, req.Offset) // BUG: 文件大小可扩不可缩 写入的数据总是一堆0（py试试？）通过python的fuse测试，发现go的fuse缺少truncate操作
-	fmt.Println("Write", n, "bytes")
+	//fmt.Println(req.Data)
+	_, err := f.file.WriteAt(req.Data, req.Offset) // BUG: 文件大小可扩不可缩 写入的数据总是一堆0（py试试？）通过python的fuse测试，发现go的fuse缺少truncate操作
+	//fmt.Println("Write", n, "bytes")
 	if err != nil {
 		fmt.Println("[ERROR]写入文件错误", err)
 	}
@@ -418,14 +365,14 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wri
 
 // 释放文件 https://godoc.org/bazil.org/fuse/fs#HandleReleaser
 func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	fmt.Println("[Release]", f.name, "Inode:", f.inode)
+	fmt.Println("[Release]", f.fullPath, "Inode:", f.inode)
 	// 如果是只读，直接返回
 	if f.flag == os.O_RDONLY {
 		f.file.Close()
 		return nil
 	}
 	// 定义路径变量
-	path := BackendDir + f.name
+	path := BackendDir + f.fullPath
 	rawPath := path + ".compressfs.raw"
 	// 如果文件被修改了，就重新压缩
 	if f.modified == true {
@@ -467,25 +414,138 @@ func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 
 // 同步文件修改到磁盘 https://godoc.org/bazil.org/fuse/fs#HandleFlusher
 func (f *File) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	fmt.Println("[Flush]", f.name)
+	fmt.Println("[Flush]", f.fullPath)
 	f.file.Sync()
 	return nil
 }
 
 // fsync（也是同步到磁盘） https://godoc.org/bazil.org/fuse/fs#NodeFsyncer
 func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	fmt.Println("[Fsync]", f.name)
+	fmt.Println("[Fsync]", f.fullPath)
 	f.file.Sync()
 	return nil
 }
 
-// 重命名 https://godoc.org/bazil.org/fuse/fs#NodeRenamer
-// TODO: BUG https://github.com/bazil/fuse/blob/master/fs/serve.go#L1314
-// func (f *File) Rename(ctx context.Context, req *fuse.RenameRequest, newDir Node) error {
-// 	fmt.Println("[Rename]", f.name, req, newDir)
+// 重命名 仅是Dir结构体的方法（文档未写明） https://godoc.org/bazil.org/fuse/fs#NodeRenamer
+// func (n *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
+// 	fmt.Println("[Rename]", n.name, req, newDir)
+// 	//TODO...
+// 	//[Rename] 123 Rename [ID=0x8 Node=0xc Uid=501 Gid=20 Pid=8959] from "666" to dirnode 0x1 "666" &{{0 /} 0xc0000aab60 0xc00000a860}
+// 	//[Rename] / Rename [ID=0x6 Node=0x1 Uid=501 Gid=20 Pid=9002] from "c.txt" to dirnode 0xc "c.txt" &{{11 123} 0xc0000aa0e0 0xc00000a840}
 // 	return nil
 // }
-// func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir Node) error {
-// 	fmt.Println("[Rename]", d.name, req, newDir)
-// 	return nil
-// }
+
+// ****************************************
+
+// 遍历目录，返回Dir结构体
+func readDir(name string, path string) Dir {
+	dirInfos, err := ioutil.ReadDir(path) //读取目录文件名
+	if err != nil {
+		fmt.Println("[ERROR]目录打开错误！", err)
+		os.Exit(1)
+	}
+	var files []*File
+	var dirs []*Dir
+	fullPath := strings.TrimSuffix(strings.TrimPrefix(path, BackendDir), "/")
+	dir := Dir{
+		Node: Node{
+			name:     name,
+			inode:    NewInode(),
+			fullPath: fullPath},
+		files:       &files,
+		directories: &dirs}
+	for _, f := range dirInfos {
+		if f.IsDir() {
+			newDir := readDir(f.Name(), path+f.Name()+"/")
+			dirs = append(dirs, &newDir)
+		} else {
+			// 如果是解压后的文件，则删除
+			if strings.LastIndex(f.Name(), ".compressfs.raw") > 0 {
+				os.Remove(dir.fullPath + "/" + f.Name())
+				continue
+			}
+			// 否则添加到文件列表
+			files = append(files, &File{
+				Node: Node{
+					name:     f.Name(),
+					inode:    NewInode(),
+					fullPath: dir.fullPath + "/" + f.Name()}})
+		}
+	}
+	return dir
+}
+
+// 启动 FUSE
+func run() error {
+	// Enable debug
+	// fuse.Debug = func(msg interface{}) {
+	// 	fmt.Println(msg)
+	// }
+
+	c, err := fuse.Mount( // see: https://godoc.org/bazil.org/fuse#MountOption
+		Mountpoint,
+		fuse.FSName("compressfs"),
+		fuse.Subtype("compressfs"),
+		fuse.LocalVolume(),
+		fuse.VolumeName("compressfs filesystem"),
+	)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if p := c.Protocol(); !p.HasInvalidate() {
+		return fmt.Errorf("kernel FUSE support is too old to have invalidations: version %v", p)
+	}
+
+	// 初始化根文件系统
+	var files []*File
+	var dirs []*Dir
+	filesys.root = &Dir{
+		Node: Node{
+			inode:    1,
+			name:     "/",
+			fullPath: ""},
+		files:       &files,
+		directories: &dirs}
+
+	// 读取 BackendDir
+	fmt.Println("[run]读取BackendDir")
+	dirInfos, err := ioutil.ReadDir(BackendDir) //读取目录文件名
+	if err != nil {
+		fmt.Println("[ERROR]BackendDir打开错误！", err)
+		os.Exit(1)
+	}
+	for _, f := range dirInfos {
+		if f.IsDir() {
+			newDir := readDir(f.Name(), BackendDir+f.Name()+"/")
+			dirs = append(dirs, &newDir)
+		} else {
+			// 如果是解压后的文件，则删除
+			if strings.LastIndex(f.Name(), ".compressfs.raw") > 0 {
+				os.Remove(BackendDir + f.Name())
+				continue
+			}
+			// 否则添加到文件列表
+			files = append(files, &File{
+				Node: Node{
+					name:     f.Name(),
+					inode:    NewInode(),
+					fullPath: f.Name()}})
+		}
+	}
+
+	// 调用 Serve
+	fmt.Println("[run]调用Serve")
+	srv := fs.New(c, nil)
+	if err := srv.Serve(&filesys); err != nil {
+		return err
+	}
+
+	// Check if the mount process has an error to report.
+	<-c.Ready
+	if err := c.MountError; err != nil {
+		return err
+	}
+	return nil
+}
