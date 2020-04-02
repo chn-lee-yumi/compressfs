@@ -1,9 +1,9 @@
-// Truncate-》setattr检查
 // TODO：增加access time，根据访问时间进行缓存的删除
 // TODO：支持修改权限
 // TODO：支持连接
 // TODO：支持重命名
-// 文件删除太慢
+// TODO：通过文件名保存文件大小
+// TODO：文件删除太慢
 package main
 
 import (
@@ -73,8 +73,9 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	return nil
 }
 
-// 文件结构体的Attr()方法，返回文件属性
+// 文件结构体的Attr()方法，返回文件属性 https://godoc.org/bazil.org/fuse#Attr
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
+	// TODO: 支持所有attr
 	//TODO：增加access time，根据访问时间进行缓存的删除
 	fmt.Println("[Attr]", f.fullPath, "Inode:", f.inode)
 	a.Inode = f.inode
@@ -111,10 +112,19 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	return nil
 }
 
+// 修改文件属性 https://godoc.org/bazil.org/fuse/fs#NodeSetattrer
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	// TODO: 支持所有attr
 	fmt.Println("[Setattr]", f.fullPath, "Inode:", f.inode)
-	// TODO....
 	fmt.Println(req)
+
+	if req.Valid.Size() {
+		// 不知道是不是一定会先open文件才truncate的，如果不是，这里需要判断f.file是否打开，如果没打开，则需要打开，然后再truncate
+		err := f.file.Truncate(int64(req.Size))
+		if err != nil {
+			fmt.Println("[ERROR]Setattr Size", err.Error())
+		}
+	}
 	return nil
 }
 

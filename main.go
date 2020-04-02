@@ -1,7 +1,5 @@
 // 一个基于FUSE的压缩文件系统。
-//
 // 目前暂不支持目录和权限修改。
-//
 // TODO：性能优化：read和write不打开文件，file属性里面存一个*os.File；捕获退出信号，自动umount
 package main
 
@@ -35,8 +33,8 @@ const HELP_INFO = `
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s BackendDir Mountpoint CompressType\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "例子：  %s /tmp/backend/ /mnt lzw\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s BackendDir Mountpoint CompressType\n", os.Args[0]) // BackendDir 和 Mountpoint 末尾有无斜杠都可
+	fmt.Fprintf(os.Stderr, "例子：  %s /tmp/backend /mnt lzw\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, HELP_INFO)
 }
 
