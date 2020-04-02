@@ -1,4 +1,3 @@
-// TODO：兼容斜杠，Backend多斜杠修复等等
 // Truncate-》setattr检查
 // TODO：增加access time，根据访问时间进行缓存的删除
 // TODO：支持修改权限
@@ -109,6 +108,13 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		io.Copy(buf, r)
 		a.Size = uint64(buf.Len())
 	}
+	return nil
+}
+
+func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	fmt.Println("[Setattr]", f.fullPath, "Inode:", f.inode)
+	// TODO....
+	fmt.Println(req)
 	return nil
 }
 
@@ -309,18 +315,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 			//返回文件Handle
 			return fn, nil
 		} else {
-			// 如果是 O_WRONLY ，则清空文件。
-			// 如果不加这个，当写入文件时会出现文件只能增大不能缩小的BUG。
-			//   如果对文件进行写入，不添加 O_TRUNC 时的 BUG 现象：
-			//   会以 WRONLY 打开文件，之后还会以 RDONLY 打开一次。先读出一堆 \0 ，然后再写入。
-			//   如果写入的长度比读出的长度短，还会以 \0 补全。
-			//   不知道为啥，怀疑是这个库的 bug 。而且这个库也没提供 truncate 的 Handler 。
-			//   最后是通过使用 pyfuse 进行对比测试发现在 Open 和 Write 之前缺少了 truncate 。
-			//   加入 truncate 后表现正常，不会打开两次文件。
 			flags := int(req.Flags)
-			if flags&os.O_WRONLY > 0 {
-				flags |= os.O_TRUNC
-			}
 			fr, err := os.OpenFile(rawPath, flags, 0755)
 			if err != nil {
 				fmt.Println("[ERROR]打开解压后的文件错误", err)
@@ -429,7 +424,7 @@ func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 // 重命名 仅是Dir结构体的方法（文档未写明） https://godoc.org/bazil.org/fuse/fs#NodeRenamer
 // func (n *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
 // 	fmt.Println("[Rename]", n.name, req, newDir)
-// 	//TODO...
+// 	//TODO...多斜杠可能引发bug
 // 	//[Rename] 123 Rename [ID=0x8 Node=0xc Uid=501 Gid=20 Pid=8959] from "666" to dirnode 0x1 "666" &{{0 /} 0xc0000aab60 0xc00000a860}
 // 	//[Rename] / Rename [ID=0x6 Node=0x1 Uid=501 Gid=20 Pid=9002] from "c.txt" to dirnode 0xc "c.txt" &{{11 123} 0xc0000aa0e0 0xc00000a840}
 // 	return nil
@@ -460,7 +455,7 @@ func readDir(name string, path string) Dir {
 			dirs = append(dirs, &newDir)
 		} else {
 			// 如果是解压后的文件，则删除
-			if strings.LastIndex(f.Name(), ".compressfs.raw") > 0 {
+			if strings.HasSuffix(f.Name(), ".compressfs.raw") {
 				os.Remove(dir.fullPath + "/" + f.Name())
 				continue
 			}
@@ -498,6 +493,11 @@ func run() error {
 		return fmt.Errorf("kernel FUSE support is too old to have invalidations: version %v", p)
 	}
 
+	// 检查参数（如果 BackendDir 不是以斜杠结尾，则加上斜杠）
+	if !strings.HasSuffix(BackendDir, "/") {
+		BackendDir = BackendDir + "/"
+	}
+
 	// 初始化根文件系统
 	var files []*File
 	var dirs []*Dir
@@ -522,7 +522,7 @@ func run() error {
 			dirs = append(dirs, &newDir)
 		} else {
 			// 如果是解压后的文件，则删除
-			if strings.LastIndex(f.Name(), ".compressfs.raw") > 0 {
+			if strings.HasSuffix(f.Name(), ".compressfs.raw") {
 				os.Remove(BackendDir + f.Name())
 				continue
 			}

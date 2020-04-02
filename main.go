@@ -37,7 +37,6 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s BackendDir Mountpoint CompressType\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "例子：  %s /tmp/backend/ /mnt lzw\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "注意BackendDir后面要有斜杠。Mountpoint有无都可\n")
 	fmt.Fprintf(os.Stderr, HELP_INFO)
 }
 
