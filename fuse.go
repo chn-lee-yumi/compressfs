@@ -7,15 +7,16 @@
 package main
 
 import (
-	"bazil.org/fuse"
-	"bazil.org/fuse/fs"
 	"bytes"
 	"fmt"
-	"golang.org/x/net/context"
 	"io"
 	"io/ioutil"
 	"os"
 	"strings"
+
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"golang.org/x/net/context"
 )
 
 // 文件系统 inode
@@ -222,8 +223,11 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 // 删除文件或目录 https://godoc.org/bazil.org/fuse#RemoveRequest
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	fmt.Println("[Remove]Dir:", d.fullPath, "Name:", req.Name, "Dir:", req.Dir)
-	os.Remove(BackendDir + d.fullPath + req.Name) // 删除文件或空目录
-	// 如果是删除目录，判断是不是有目录
+	err := os.Remove(BackendDir + d.fullPath + "/" + req.Name) // 删除文件或空目录
+	if err != nil {
+		fmt.Println(err, BackendDir+d.fullPath+"/"+req.Name)
+	}
+	// 如果是删除目录，判断是不是有目录；如果删除文件，先看有没有文件
 	if req.Dir && d.directories != nil {
 		newDirs := []*Dir{}
 		// 如果有，遍历目录名，组成一个新的目录列表
@@ -234,7 +238,6 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		}
 		d.directories = &newDirs
 		return nil
-		// 如果删除文件，先看有没有文件
 	} else if !req.Dir && *d.files != nil {
 		newFiles := []*File{}
 		// 如果有，遍历文件名，组成一个新的文件列表
@@ -491,8 +494,6 @@ func run() error {
 		Mountpoint,
 		fuse.FSName("compressfs"),
 		fuse.Subtype("compressfs"),
-		fuse.LocalVolume(),
-		fuse.VolumeName("compressfs filesystem"),
 	)
 	if err != nil {
 		return err
@@ -552,10 +553,5 @@ func run() error {
 		return err
 	}
 
-	// Check if the mount process has an error to report.
-	<-c.Ready
-	if err := c.MountError; err != nil {
-		return err
-	}
 	return nil
 }
