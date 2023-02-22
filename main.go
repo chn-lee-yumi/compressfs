@@ -1,6 +1,4 @@
 // 一个基于FUSE的压缩文件系统。
-// 目前暂不支持目录和权限修改。
-// TODO：性能优化：read和write不打开文件，file属性里面存一个*os.File；捕获退出信号，自动umount
 package main
 
 import (

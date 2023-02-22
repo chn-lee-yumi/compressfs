@@ -1,5 +1,7 @@
+// TODO：性能优化：read和write不打开文件，file属性里面存一个*os.File
+// TODO：优雅退出，捕获退出信号，自动umount
 // TODO：增加access time，根据访问时间进行缓存的删除
-// TODO：支持修改权限
+// TODO：支持目录和权限修改
 // TODO：支持连接
 // TODO：支持重命名
 // TODO：通过文件名保存文件大小
@@ -12,20 +14,22 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"golang.org/x/net/context"
 )
 
-// 文件系统 inode
-var inode uint64
+// 记录当前已分配到的inode数字
+var allocatedInode uint64
 
-// 返回一个新的 inode  TODO: 使用自带函数生成inode
+// 返回一个新的 inode
 func NewInode() uint64 {
-	inode += 1
-	return inode
+	allocatedInode += 1
+	return allocatedInode
 }
 
 // 文件系统
@@ -47,7 +51,7 @@ type Node struct {
 	inode uint64
 	//parent_inode uint64
 	name     string
-	fullPath string // 完整路径，以FUSE根目录为空，其绝对路径为BackendDir+fullPath（BackendDir带/）
+	fullPath string // 完整路径，以FUSE根目录为空，其绝对路径为BackendDir+fullPath（BackendDir带/，fullPath不带/）
 }
 
 // 目录结构体，自定义的，继承了Node结构体，一个目录下包含一些文件和目录
@@ -500,6 +504,23 @@ func run() error {
 	}
 	defer c.Close()
 
+	// 优雅退出
+	exitChan := make(chan os.Signal)
+	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for {
+			select {
+			case sig := <-exitChan:
+				fmt.Println("Received signal:", sig)
+				err := fuse.Unmount(Mountpoint)
+				if err != nil {
+					fmt.Println("Umount error:", err)
+				}
+			}
+		}
+	}()
+
+	// 判断协议版本支持
 	if p := c.Protocol(); !p.HasInvalidate() {
 		return fmt.Errorf("kernel FUSE support is too old to have invalidations: version %v", p)
 	}
